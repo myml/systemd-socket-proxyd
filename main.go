@@ -33,20 +33,14 @@ func main() {
 		return
 	}
 	var l net.Listener
-	l, err := net.Listen("tcp", "127.0.0.1:1234")
+	listeners, err := activation.Listeners()
 	if err != nil {
-		log.Panic(err)
+		log.Panic("Listeners", err)
 	}
-	if false {
-		listeners, err := activation.Listeners()
-		if err != nil {
-			log.Panic("Listeners", err)
-		}
-		if len(listeners) != 1 {
-			log.Panic("Unexpected number of socket activation fds")
-		}
-		l = listeners[0]
+	if len(listeners) != 1 {
+		log.Panic("Unexpected number of socket activation fds")
 	}
+	l = listeners[0]
 	idleTimer := time.AfterFunc(exitIdleTime, func() { os.Exit(0) })
 	var connectionCount int32
 	for {
