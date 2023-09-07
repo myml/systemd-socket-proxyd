@@ -22,11 +22,11 @@ var (
 )
 
 func main() {
-	flag.StringVar(&netType, "type", netType, "network type: tcp or unix")
-	flag.StringVar(&netAddress, "address", netAddress, "proxy to the address")
-	flag.IntVar(&connectionsMax, "connections-max", connectionsMax, "Set the maximum number of connections to be accepted")
-	flag.DurationVar(&exitIdleTime, "exit-idle-time", exitIdleTime, "Exit when without a connection for this duration")
-	flag.IntVar(&retryCount, "retry", retryCount, "retry reconnect upstream")
+	flag.StringVar(&netType, "type", netType, "网络类型: tcp 或 unix")
+	flag.StringVar(&netAddress, "address", netAddress, "上游地址")
+	flag.IntVar(&connectionsMax, "connections-max", connectionsMax, "允许最大连接数量")
+	flag.DurationVar(&exitIdleTime, "exit-idle-time", exitIdleTime, "在空闲指定时间后退出")
+	flag.IntVar(&retryCount, "retry", retryCount, "重试连接上游的次数")
 	flag.Parse()
 	if len(netAddress) == 0 {
 		flag.PrintDefaults()
@@ -35,67 +35,65 @@ func main() {
 	var l net.Listener
 	listeners, err := activation.Listeners()
 	if err != nil {
-		panic(err)
+		log.Panic("Listeners", err)
 	}
 	if len(listeners) != 1 {
-		panic("Unexpected number of socket activation fds")
+		log.Panic("Unexpected number of socket activation fds")
 	}
 	l = listeners[0]
-	exit := time.AfterFunc(exitIdleTime, func() { os.Exit(0) })
+	idleTimer := time.AfterFunc(exitIdleTime, func() { os.Exit(0) })
 	var connectionCount int32
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			log.Println(err)
-			return
+			log.Panic("Accept", err)
 		}
-		exit.Stop()
-		if connectionsMax > 0 {
-			if connectionCount > int32(connectionsMax) {
-				log.Println("max connect")
-				continue
-			}
+		if connectionsMax > 0 && connectionCount > int32(connectionsMax) {
+			c.Close()
+			log.Println("max connect limit")
+			continue
 		}
+		idleTimer.Stop()
 		go func() {
+			defer c.Close()
 			atomic.AddInt32(&connectionCount, 1)
 			defer func() {
 				atomic.AddInt32(&connectionCount, -1)
 				if connectionCount == 0 {
-					log.Println("exit idle")
-					exit.Reset(exitIdleTime)
+					log.Printf("连接空闲，在 %s 后退出\n", exitIdleTime)
+					idleTimer.Reset(exitIdleTime)
 				}
 			}()
-			log.Println("proxy", c.RemoteAddr(), netType, netAddress)
-			proxy(c, netType, netAddress)
-			log.Println("proxy end", c.RemoteAddr(), netType, netAddress)
+			for i := 0; i < retryCount; i++ {
+				s, err := net.Dial(netType, netAddress)
+				if err != nil {
+					log.Printf("无法连接到上游(%d): %s\n", i, err)
+					time.Sleep(time.Second)
+					continue
+				}
+				defer s.Close()
+				log.Println("proxy start", c.RemoteAddr(), netType, netAddress)
+				err = biCopy(context.Background(), c, s)
+				log.Println("proxy end", c.RemoteAddr(), netType, netAddress, err)
+			}
 		}()
 	}
 }
 
-func proxy(c net.Conn, netType, netAddress string) {
-	defer c.Close()
-	for i := 0; i < retryCount; i++ {
-		s, err := net.Dial(netType, netAddress)
-		if err != nil {
-			log.Println(err)
-			time.Sleep(time.Second)
-			continue
-		}
-		defer s.Close()
-		biCopy(context.Background(), c, s)
-		break
-	}
-}
-
-func biCopy(c context.Context, a, b net.Conn) {
-	c, cancel := context.WithCancel(c)
+func biCopy(c context.Context, a, b net.Conn) error {
+	c, cancel := context.WithCancelCause(c)
 	go func() {
-		defer cancel()
-		log.Println(io.Copy(a, b))
+		_, err := io.Copy(a, b)
+		if err != nil {
+			cancel(err)
+		}
 	}()
 	go func() {
-		defer cancel()
-		log.Println(io.Copy(b, a))
+		_, err := io.Copy(b, a)
+		if err != nil {
+			cancel(err)
+		}
 	}()
 	<-c.Done()
+	return c.Err()
 }
