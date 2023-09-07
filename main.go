@@ -33,14 +33,20 @@ func main() {
 		return
 	}
 	var l net.Listener
-	listeners, err := activation.Listeners()
+	l, err := net.Listen("tcp", "127.0.0.1:1234")
 	if err != nil {
-		log.Panic("Listeners", err)
+		log.Panic(err)
 	}
-	if len(listeners) != 1 {
-		log.Panic("Unexpected number of socket activation fds")
+	if false {
+		listeners, err := activation.Listeners()
+		if err != nil {
+			log.Panic("Listeners", err)
+		}
+		if len(listeners) != 1 {
+			log.Panic("Unexpected number of socket activation fds")
+		}
+		l = listeners[0]
 	}
-	l = listeners[0]
 	idleTimer := time.AfterFunc(exitIdleTime, func() { os.Exit(0) })
 	var connectionCount int32
 	for {
@@ -60,21 +66,22 @@ func main() {
 			defer func() {
 				atomic.AddInt32(&connectionCount, -1)
 				if connectionCount == 0 {
-					log.Printf("连接空闲，在 %s 后退出\n", exitIdleTime)
+					log.Printf("连接空闲，服务在 %s 后退出\n", exitIdleTime)
 					idleTimer.Reset(exitIdleTime)
 				}
 			}()
-			for i := 0; i < retryCount; i++ {
-				s, err := net.Dial(netType, netAddress)
+			for i := 1; i < retryCount; i++ {
+				s, err := net.DialTimeout(netType, netAddress, time.Second)
 				if err != nil {
-					log.Printf("无法连接到上游(%d): %s\n", i, err)
+					log.Printf("无法连接到上游(重试次数%d/%d): %s\n", i, retryCount, err)
 					time.Sleep(time.Second)
 					continue
 				}
 				defer s.Close()
-				log.Println("proxy start", c.RemoteAddr(), netType, netAddress)
+				log.Println("开始转发", c.RemoteAddr(), "<=>", netAddress)
 				err = biCopy(context.Background(), c, s)
-				log.Println("proxy end", c.RemoteAddr(), netType, netAddress, err)
+				log.Println("结束转发", c.RemoteAddr(), "<=>", netAddress, err)
+				return
 			}
 		}()
 	}
@@ -84,16 +91,12 @@ func biCopy(c context.Context, a, b net.Conn) error {
 	c, cancel := context.WithCancelCause(c)
 	go func() {
 		_, err := io.Copy(a, b)
-		if err != nil {
-			cancel(err)
-		}
+		cancel(err)
 	}()
 	go func() {
 		_, err := io.Copy(b, a)
-		if err != nil {
-			cancel(err)
-		}
+		cancel(err)
 	}()
 	<-c.Done()
-	return c.Err()
+	return context.Cause(c)
 }
